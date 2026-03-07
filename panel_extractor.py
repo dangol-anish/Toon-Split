@@ -161,30 +161,68 @@ def crop_to_content(strip: np.ndarray) -> np.ndarray | None:
     if non_white_count < 50 or (non_white_count / float(total_pixels)) < 0.001:
         return None
 
-    # Find bounding rows and columns that contain any non-white pixels.
-    rows_with_content = np.where(non_white_mask.any(axis=1))[0]
-    cols_with_content = np.where(non_white_mask.any(axis=0))[0]
+    # Compute non-white density per row and per column to aggressively
+    # trim sparse edge pixels (e.g. from slanted lines or speech bubbles).
+    row_non_white_counts = non_white_mask.sum(axis=1)
+    col_non_white_counts = non_white_mask.sum(axis=0)
 
-    if rows_with_content.size == 0 or cols_with_content.size == 0:
+    row_density = row_non_white_counts.astype(np.float32) / float(w)
+    col_density = col_non_white_counts.astype(np.float32) / float(h)
+
+    # Thresholds tuned to remove most white margins while allowing slight
+    # cropping into content, which is acceptable for this use case.
+    min_row_density = 0.01  # at least 1% of pixels in the row are non-white
+    min_col_density = 0.005  # at least 0.5% of pixels in the column are non-white
+
+    valid_rows = np.where(row_density >= min_row_density)[0]
+    valid_cols = np.where(col_density >= min_col_density)[0]
+
+    if valid_rows.size == 0 or valid_cols.size == 0:
         return None
 
-    top = int(rows_with_content[0])
-    bottom = int(rows_with_content[-1])
-    left = int(cols_with_content[0])
-    right = int(cols_with_content[-1])
+    top = int(valid_rows[0])
+    bottom = int(valid_rows[-1])
+    left = int(valid_cols[0])
+    right = int(valid_cols[-1])
 
     if bottom < top or right < left:
         return None
 
     cropped = strip[top : bottom + 1, left : right + 1]
 
-    # Enforce minimum height for a valid panel.
-    min_panel_height = 150
-    cropped_h = cropped.shape[0]
-    if cropped_h < min_panel_height:
+    # Second pass: trim any almost-all-white rows at the very top and bottom
+    # of the cropped panel to remove residual white bands around bubbles, etc.
+    cropped_gray = gray[top : bottom + 1, left : right + 1]
+    ch, cw = cropped_gray.shape[:2]
+
+    if ch == 0 or cw == 0:
         return None
 
-    return cropped
+    white_mask_cropped = cropped_gray >= 240
+    white_fraction_rows = white_mask_cropped.mean(axis=1)
+
+    # Move top_index down while rows are >= 97% white.
+    top_index = 0
+    while top_index < ch and white_fraction_rows[top_index] >= 0.97:
+        top_index += 1
+
+    # Move bottom_index up while rows are >= 97% white.
+    bottom_index = ch - 1
+    while bottom_index >= top_index and white_fraction_rows[bottom_index] >= 0.97:
+        bottom_index -= 1
+
+    if bottom_index < top_index:
+        return None
+
+    final_cropped = cropped[top_index : bottom_index + 1, :, :]
+
+    # Enforce minimum height for a valid panel.
+    min_panel_height = 150
+    final_h = final_cropped.shape[0]
+    if final_h < min_panel_height:
+        return None
+
+    return final_cropped
 
 
 def save_panels(
