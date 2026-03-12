@@ -40,34 +40,45 @@ You can also use a virtual environment if you prefer.
 
 - You provide a folder containing **long, vertical images** (webtoon/manhwa pages).
 - Supported extensions: `.png`, `.jpg`, `.jpeg`, `.webp`, `.bmp`, `.tif`, `.tiff`.
-- Example structure:
+- The input can be either:
+  - A **flat folder** of images, or
+  - A folder of **chapter subfolders**, where each chapter folder contains its page images.
+- Example structure (chapter folders):
 
 ```text
 Toon-Split/
   panel_extractor.py
   raw_pages/
-    001.png
-    002.png
-    003.png
-    ...
+    chapter_001/
+      001.png
+      002.png
+      ...
+    chapter_002/
+      001.png
+      002.png
+      ...
 ```
 
 ### Output
 
-- For each input image, panels are saved to an output folder, e.g.:
+- For each input image, panels are saved under the output folder.
+- If your input uses **chapter subfolders**, the output mirrors that structure, e.g.:
 
 ```text
 panel_output/
-  001_panel_001.png
-  001_panel_002.png
-  002_panel_001.png
-  ...
+  chapter_001/
+    001_panel_001.png
+    001_panel_002.png
+    ...
+  chapter_002/
+    001_panel_001.png
+    ...
 ```
 
-- In **debug mode**, a `debug/` subfolder is also created:
+- In **debug mode**, a `debug/` subfolder is also created (per chapter when using chapter folders):
 
 ```text
-panel_output/debug/
+panel_output/chapter_001/debug/
   001_debug.png   # red lines showing detected separators
   002_debug.png
 ```

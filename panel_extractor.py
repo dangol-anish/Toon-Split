@@ -1,6 +1,6 @@
 import argparse
 import os
-from typing import List, Tuple
+from typing import List, Tuple, Iterable
 
 import cv2
 import numpy as np
@@ -24,28 +24,41 @@ COL_DENSITY_MIN = COL_DENSITY_MIN_DEFAULT
 HEIGHT_FALLBACK_THRESHOLD = HEIGHT_FALLBACK_THRESHOLD_DEFAULT
 
 
-def load_images_from_folder(folder_path: str) -> List[str]:
+def _iter_image_paths_under_root(root_folder: str) -> Iterable[tuple[str, str]]:
     """
-    Return a sorted list of image file paths inside the given folder.
+    Yield (abs_path, rel_path) for supported images under the given root.
 
-    This supports batch processing of all images in the input directory.
+    This supports both:
+    - Flat input folders (images directly inside root_folder)
+    - Chapter folders (subfolders under root_folder containing images)
     """
     supported_ext = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
 
-    if not os.path.isdir(folder_path):
-        raise ValueError(f"Input folder does not exist or is not a directory: {folder_path}")
+    if not os.path.isdir(root_folder):
+        raise ValueError(
+            f"Input folder does not exist or is not a directory: {root_folder}"
+        )
 
-    image_paths: List[str] = []
-    for name in os.listdir(folder_path):
-        full_path = os.path.join(folder_path, name)
-        if not os.path.isfile(full_path):
-            continue
-        _, ext = os.path.splitext(name)
-        if ext.lower() in supported_ext:
-            image_paths.append(os.path.abspath(full_path))
+    root_folder = os.path.abspath(root_folder)
 
-    image_paths.sort()
-    return image_paths
+    for dirpath, _, filenames in os.walk(root_folder):
+        for name in filenames:
+            _, ext = os.path.splitext(name)
+            if ext.lower() not in supported_ext:
+                continue
+            abs_path = os.path.abspath(os.path.join(dirpath, name))
+            rel_path = os.path.relpath(abs_path, root_folder)
+            yield abs_path, rel_path
+
+def load_images_from_folder(folder_path: str) -> List[str]:
+    """
+    Backwards-compatible helper that returns only absolute image paths.
+
+    Prefer using `_iter_image_paths_under_root()` for chapter-aware processing.
+    """
+    items = list(_iter_image_paths_under_root(folder_path))
+    items.sort(key=lambda x: x[1])
+    return [abs_path for abs_path, _ in items]
 
 
 def find_vertical_whitespace(image: np.ndarray) -> List[Tuple[int, int]]:
@@ -534,6 +547,7 @@ def process_image(
     image_path: str,
     output_folder: str,
     debug: bool = False,
+    rel_path: str | None = None,
 ) -> dict | None:
     """
     Orchestrate the full pipeline for a single image:
@@ -561,7 +575,8 @@ def process_image(
 
     height, width = image.shape[:2]
     if debug:
-        print(f"[INFO] Loaded image '{os.path.basename(image_path)}' with size {width}x{height}")
+        shown = rel_path if rel_path else os.path.basename(image_path)
+        print(f"[INFO] Loaded image '{shown}' with size {width}x{height}")
 
     separators_whitespace = find_vertical_whitespace(image)
 
@@ -621,6 +636,7 @@ def process_image(
 
     return {
         "image_path": image_path,
+        "rel_path": rel_path,
         "width": width,
         "height": height,
         "panel_count": len(panels),
@@ -712,9 +728,10 @@ def main() -> None:
 
     os.makedirs(output_folder, exist_ok=True)
 
-    image_paths = load_images_from_folder(input_folder)
+    image_items = list(_iter_image_paths_under_root(input_folder))
+    image_items.sort(key=lambda x: x[1])
 
-    if not image_paths:
+    if not image_items:
         print(f"[INFO] No images found in folder: {input_folder}")
         return
 
@@ -723,20 +740,25 @@ def main() -> None:
         f"  Input folder : {input_folder}\n"
         f"  Output folder: {output_folder}\n"
         f"  Debug mode   : {args.debug}\n"
-        f"  Images found : {len(image_paths)}"
+        f"  Images found : {len(image_items)}"
     )
 
     stats: list[dict] = []
 
     if args.workers <= 1:
         # Sequential processing.
-        for idx, image_path in enumerate(image_paths, start=1):
+        for idx, (image_path, rel_path) in enumerate(image_items, start=1):
+            chapter = rel_path.split(os.sep, 1)[0] if os.sep in rel_path else None
+            per_image_output = (
+                os.path.join(output_folder, chapter) if chapter else output_folder
+            )
             if args.debug:
                 print(
-                    f"[INFO] Processing image {idx}/{len(image_paths)}: "
-                    f"{os.path.basename(image_path)}"
+                    f"[INFO] Processing image {idx}/{len(image_items)}: {rel_path}"
                 )
-            image_stats = process_image(image_path, output_folder, debug=args.debug)
+            image_stats = process_image(
+                image_path, per_image_output, debug=args.debug, rel_path=rel_path
+            )
             if image_stats is not None:
                 stats.append(image_stats)
     else:
@@ -748,8 +770,16 @@ def main() -> None:
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_to_path = {
-                executor.submit(process_image, path, output_folder, args.debug): path
-                for path in image_paths
+                executor.submit(
+                    process_image,
+                    abs_path,
+                    (os.path.join(output_folder, rel_path.split(os.sep, 1)[0])
+                     if os.sep in rel_path
+                     else output_folder),
+                    args.debug,
+                    rel_path,
+                ): abs_path
+                for abs_path, rel_path in image_items
             }
             for future in as_completed(future_to_path):
                 image_stats = future.result()
@@ -780,13 +810,13 @@ def main() -> None:
     if tall_single_panel:
         print("\nImages that are tall but produced only 0–1 panels:")
         for s in tall_single_panel:
-            rel = os.path.relpath(s["image_path"], input_folder)
+            rel = s.get("rel_path") or os.path.relpath(s["image_path"], input_folder)
             print(f"  - {rel} (height={s['height']}, panels={s['panel_count']})")
 
     if zero_panel:
         print("\nImages that produced 0 panels:")
         for s in zero_panel:
-            rel = os.path.relpath(s["image_path"], input_folder)
+            rel = s.get("rel_path") or os.path.relpath(s["image_path"], input_folder)
             print(f"  - {rel} (height={s['height']})")
 
 
